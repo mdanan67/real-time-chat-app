@@ -1,5 +1,8 @@
 const messageService = require('../services/message.service');
+const conversationService = require('../services/conversation.service');
+const groupService = require('../services/group.service');
 const ApiResponse = require('../responses/apiResponse');
+const { getConversationMembers, getGroupMembers } = require('../database/database.postgrace');
 
 /**
  * Message Controller - Handles message HTTP requests.
@@ -13,30 +16,34 @@ class MessageController {
       const io = req.app.get('io');
       if (io) {
         if (message.conversationId) {
-          // Emit to conversation room (for users who have it open)
-          io.to(`conversation:${message.conversationId}`).emit('new:message', message);
-          // Emit to BOTH participants' personal rooms for instant delivery
-          // regardless of whether they have the conversation tab open
-          io.to(`user:${req.user.id}`).emit('new:message', message);
-          // Also emit to all members of this conversation
           try {
-            const { getConversationMembers } = require('../database/database.postgrace');
             const members = await getConversationMembers(message.conversationId);
+            const conversation = await conversationService.getConversationSnapshot(
+              message.conversationId
+            );
+
+            io.to(`conversation:${message.conversationId}`).emit('new:message', message);
             members.forEach((m) => {
               io.to(`user:${m.userId}`).emit('new:message', message);
+              if (conversation) {
+                io.to(`user:${m.userId}`).emit('conversation:updated', conversation);
+              }
             });
           } catch (e) {
             console.error('Failed to emit to conversation members:', e.message);
           }
         }
         if (message.groupId) {
-          io.to(`group:${message.groupId}`).emit('new:message', message);
-          io.to(`user:${req.user.id}`).emit('new:message', message);
           try {
-            const { getGroupMembers } = require('../database/database.postgrace');
             const members = await getGroupMembers(message.groupId);
+            const group = await groupService.getGroupSnapshot(message.groupId);
+
+            io.to(`group:${message.groupId}`).emit('new:message', message);
             members.forEach((m) => {
               io.to(`user:${m.userId}`).emit('new:message', message);
+              if (group) {
+                io.to(`user:${m.userId}`).emit('group:updated', group);
+              }
             });
           } catch (e) {
             console.error('Failed to emit to group members:', e.message);

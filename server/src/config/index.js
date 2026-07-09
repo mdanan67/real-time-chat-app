@@ -3,6 +3,17 @@ const path = require('path');
 
 dotenv.config({ path: path.resolve(__dirname, '../../.env') });
 
+const defaultCorsOrigins = ['http://localhost:3000', 'http://localhost:5173'];
+
+function parseCorsOrigin(value) {
+  if (!value) return defaultCorsOrigins;
+  if (value.trim() === '*') return '*';
+  return value
+    .split(',')
+    .map((origin) => origin.trim())
+    .filter(Boolean);
+}
+
 const config = {
   env: process.env.NODE_ENV || 'development',
   port: parseInt(process.env.PORT, 10) || 3000,
@@ -19,7 +30,7 @@ const config = {
   },
 
   cors: {
-    origin: process.env.CORS_ORIGIN || 'http://localhost:3000',
+    origin: parseCorsOrigin(process.env.CORS_ORIGIN),
   },
 
   rateLimit: {

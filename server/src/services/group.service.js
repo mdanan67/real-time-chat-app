@@ -83,6 +83,14 @@ class GroupService {
   }
 
   /**
+   * Get a formatted group by ID without checking a specific viewer.
+   * Used after membership was already verified by the message flow.
+   */
+  async getGroupSnapshot(groupId) {
+    return this._formatGroup(groupId);
+  }
+
+  /**
    * Update group information.
    */
   async updateGroup(groupId, userId, updates) {

@@ -110,6 +110,14 @@ class ConversationService {
   }
 
   /**
+   * Get a formatted conversation by ID without checking a specific viewer.
+   * Used after membership was already verified by the message flow.
+   */
+  async getConversationSnapshot(conversationId) {
+    return this._formatConversation(conversationId);
+  }
+
+  /**
    * Format conversation with member and message details.
    */
   async _formatConversation(conversationId) {

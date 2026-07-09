@@ -219,7 +219,6 @@ const Icons = {
 // ============ SOCKET SETUP ============
 // Use the Vite proxy path - it will forward to the backend on port 3000
 const SOCKET_URL = '/';
-let socket = null;
 
 // ============ UTILITY FUNCTIONS ============
 function formatTime(dateStr) {
@@ -246,6 +245,25 @@ function formatDate(dateStr) {
     day: 'numeric',
     year: 'numeric',
   });
+}
+
+function getChatActivityTime(chat) {
+  return new Date(
+    chat?.lastMessageAt || chat?.messages?.[0]?.createdAt || chat?.updatedAt || chat?.createdAt || 0
+  ).getTime();
+}
+
+function sortChatsByActivity(chats) {
+  return [...chats].sort((a, b) => getChatActivityTime(b) - getChatActivityTime(a));
+}
+
+function upsertChat(chats, incoming) {
+  const exists = chats.some((chat) => chat.id === incoming.id);
+  const next = exists
+    ? chats.map((chat) => (chat.id === incoming.id ? { ...chat, ...incoming } : chat))
+    : [incoming, ...chats];
+
+  return sortChatsByActivity(next);
 }
 
 // ============ AUTH SCREEN ============
@@ -1393,12 +1411,34 @@ export default function App() {
   // Use refs to avoid stale closures in socket event handlers
   const activeChatRef = useRef(activeChat);
   const userRef = useRef(user);
+  const conversationsRef = useRef(conversations);
+  const groupsRef = useRef(groups);
   useEffect(() => {
     activeChatRef.current = activeChat;
   }, [activeChat]);
   useEffect(() => {
     userRef.current = user;
   }, [user]);
+  useEffect(() => {
+    conversationsRef.current = conversations;
+  }, [conversations]);
+  useEffect(() => {
+    groupsRef.current = groups;
+  }, [groups]);
+
+  // Fetch conversations and groups
+  const fetchData = useCallback(async () => {
+    try {
+      const [convResult, groupResult] = await Promise.all([
+        conversationsApi.getAll(),
+        groupsApi.getAll(),
+      ]);
+      setConversations(sortChatsByActivity(convResult.conversations || []));
+      setGroups(sortChatsByActivity(groupResult.groups || []));
+    } catch (err) {
+      console.error('Failed to fetch data:', err);
+    }
+  }, []);
 
   // Initialize socket connection (only once on mount)
   const initSocket = useCallback((token) => {
@@ -1434,7 +1474,6 @@ export default function App() {
     s.on('new:message', (message) => {
       // Use refs to get latest activeChat/user without stale closures
       const currentActive = activeChatRef.current;
-      const currentUser = userRef.current;
       const isForActiveChat =
         currentActive &&
         ((currentActive.type === 'conversation' && message.conversationId === currentActive.id) ||
@@ -1448,22 +1487,36 @@ export default function App() {
       }
       // Update conversation/group last message in sidebar
       if (message.conversationId) {
+        const isKnownConversation = conversationsRef.current.some(
+          (conv) => conv.id === message.conversationId
+        );
+        if (!isKnownConversation) {
+          fetchData();
+        }
         setConversations((prev) =>
-          prev.map((conv) => {
-            if (conv.id === message.conversationId) {
-              return { ...conv, lastMessageAt: message.createdAt, messages: [message] };
-            }
-            return conv;
-          })
+          sortChatsByActivity(
+            prev.map((conv) => {
+              if (conv.id === message.conversationId) {
+                return { ...conv, lastMessageAt: message.createdAt, messages: [message] };
+              }
+              return conv;
+            })
+          )
         );
       } else if (message.groupId) {
+        const isKnownGroup = groupsRef.current.some((group) => group.id === message.groupId);
+        if (!isKnownGroup) {
+          fetchData();
+        }
         setGroups((prev) =>
-          prev.map((g) => {
-            if (g.id === message.groupId) {
-              return { ...g, messages: [message] };
-            }
-            return g;
-          })
+          sortChatsByActivity(
+            prev.map((g) => {
+              if (g.id === message.groupId) {
+                return { ...g, updatedAt: message.createdAt, messages: [message] };
+              }
+              return g;
+            })
+          )
         );
       }
     });
@@ -1481,11 +1534,20 @@ export default function App() {
         )
       );
     });
+    s.on('conversation:updated', (conversation) => {
+      setConversations((prev) => upsertChat(prev, conversation));
+      setActiveChat((prev) => {
+        if (prev?.id === conversation.id && prev?.type === 'conversation') {
+          return { ...prev, ...conversation, type: 'conversation' };
+        }
+        return prev;
+      });
+    });
     s.on('group:updated', (group) => {
-      setGroups((prev) => prev.map((g) => (g.id === group.id ? { ...g, ...group } : g)));
+      setGroups((prev) => upsertChat(prev, group));
       setActiveChat((prev) => {
         if (prev?.id === group.id && prev?.type === 'group') {
-          return { ...prev, ...group };
+          return { ...prev, ...group, type: 'group' };
         }
         return prev;
       });
@@ -1512,7 +1574,7 @@ export default function App() {
       }
     });
     socketRef.current = s;
-  }, []); // Only create socket once - use refs for dynamic values
+  }, [fetchData]);
 
   // Check for stored auth token on mount
   useEffect(() => {
@@ -1540,31 +1602,19 @@ export default function App() {
     const s = socketRef.current;
     if (activeChat.type === 'conversation') {
       s.emit('conversation:join', activeChat.id);
-    } else {
+    } else if (activeChat.type === 'group') {
       s.emit('group:join', activeChat.id);
+    } else {
+      return;
     }
     return () => {
       if (activeChat.type === 'conversation') {
         s.emit('conversation:leave', activeChat.id);
-      } else {
+      } else if (activeChat.type === 'group') {
         s.emit('group:leave', activeChat.id);
       }
     };
   }, [activeChat]);
-
-  // Fetch conversations and groups
-  const fetchData = useCallback(async () => {
-    try {
-      const [convResult, groupResult] = await Promise.all([
-        conversationsApi.getAll(),
-        groupsApi.getAll(),
-      ]);
-      setConversations(convResult.conversations || []);
-      setGroups(groupResult.groups || []);
-    } catch (err) {
-      console.error('Failed to fetch data:', err);
-    }
-  }, []);
 
   useEffect(() => {
     if (user) {
@@ -1584,11 +1634,13 @@ export default function App() {
         let result;
         if (activeChat.type === 'conversation') {
           result = await messagesApi.getConversationMessages(activeChat.id);
-        } else {
+        } else if (activeChat.type === 'group') {
           result = await messagesApi.getGroupMessages(activeChat.id);
+        } else {
+          return;
         }
-        // Reverse so newest is at bottom
-        setMessages((result.messages || []).reverse());
+        // API returns oldest-to-newest so the newest message stays at the bottom.
+        setMessages(result.messages || []);
 
         // Mark messages as read (mark all non-owned messages)
         const unreadIds = (result.messages || [])
@@ -1609,10 +1661,10 @@ export default function App() {
     if (!activeChat) return;
     if (activeChat.type === 'conversation') {
       const updated = conversations.find((c) => c.id === activeChat.id);
-      if (updated) setActiveChat((prev) => ({ ...prev, ...updated }));
-    } else {
+      if (updated) setActiveChat((prev) => ({ ...prev, ...updated, type: 'conversation' }));
+    } else if (activeChat.type === 'group') {
       const updated = groups.find((g) => g.id === activeChat.id);
-      if (updated) setActiveChat((prev) => ({ ...prev, ...updated }));
+      if (updated) setActiveChat((prev) => ({ ...prev, ...updated, type: 'group' }));
     }
   }, [conversations, groups, activeChat?.id, activeChat?.type]);
 
@@ -1653,8 +1705,10 @@ export default function App() {
       };
       if (activeChat.type === 'conversation') {
         data.conversationId = activeChat.id;
-      } else {
+      } else if (activeChat.type === 'group') {
         data.groupId = activeChat.id;
+      } else {
+        return;
       }
       const result = await messagesApi.send(data);
       // Add the message locally immediately so the sender sees it
